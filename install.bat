@@ -62,7 +62,7 @@ set "SERVER_PY=%ROOT_DIR%src\mcp-server\server.py"
 set "PYTHON_EXE_ESC=%PYTHON_EXE:\=\\%"
 set "SERVER_PY_ESC=%SERVER_PY:\=\\%"
 
-echo Copy the following JSON snippet to Antigravity IDE MCP settings:
+echo Copy the following JSON snippet to your MCP Client settings (Antigravity, Claude Desktop, Cursor, VS Code, etc.):
 echo ---------------------------------------------------
 echo {
 echo   "mcpServers": {
