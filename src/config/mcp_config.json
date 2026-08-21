@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "revit-2027": {
+      "command": "<PATH_TO_PYTHON_VENV>/Scripts/python.exe",
+      "args": [
+        "<PATH_TO_PROJECT_ROOT>/src/mcp-server/server.py"
+      ]
+    }
+  }
+}

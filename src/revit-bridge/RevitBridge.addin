@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>RevitBridgeApp</Name>
+    <Assembly>RevitBridge.dll</Assembly>
+    <FullClassName>RevitBridge.RevitBridgeApp</FullClassName>
+    <ClientId>B8A7C6E5-4D3C-2B1A-9876-543210FEDCBA</ClientId>
+    <VendorId>MCP_DEV</VendorId>
+    <VendorDescription>Model Context Protocol (MCP) Bridge for Autodesk Revit 2027</VendorDescription>
+  </AddIn>
+</RevitAddIns>

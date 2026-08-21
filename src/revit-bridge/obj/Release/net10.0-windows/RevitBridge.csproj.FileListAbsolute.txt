@@ -1,0 +1,13 @@
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\bin\Release\net10.0-windows\RevitBridge.deps.json
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\bin\Release\net10.0-windows\RevitBridge.dll
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\bin\Release\net10.0-windows\RevitBridge.pdb
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\RevitBridge.csproj.AssemblyReference.cache
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\RevitBridge.GeneratedMSBuildEditorConfig.editorconfig
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\RevitBridge.AssemblyInfoInputs.cache
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\RevitBridge.AssemblyInfo.cs
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\RevitBridge.csproj.CoreCompileInputs.cache
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\RevitBridge.sourcelink.json
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\RevitBridge.dll
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\refint\RevitBridge.dll
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\RevitBridge.pdb
+F:\core\projects\github\revit-2027-mcp\src\revit-bridge\obj\Release\net10.0-windows\ref\RevitBridge.dll
