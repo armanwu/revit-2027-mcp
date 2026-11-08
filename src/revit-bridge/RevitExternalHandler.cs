@@ -5,6 +5,8 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.Architecture;
+using Autodesk.Revit.DB.Structure;
 using Autodesk.Revit.UI;
 
 namespace RevitBridge
@@ -21,7 +23,14 @@ namespace RevitBridge
         GetProjectInfo,
         GetLevels,
         GetViews,
-        DeleteElements
+        DeleteElements,
+        GetAvailableTypes,
+        CreateLevel,
+        CreateGrid,
+        CreateWall,
+        CreateFloor,
+        PlaceFamilyInstance,
+        CreateRoom
     }
 
     public class BridgeTask
@@ -33,6 +42,12 @@ namespace RevitBridge
 
     public class RevitExternalHandler : IExternalEventHandler
     {
+        private const double MmToFeet = 1.0 / 304.8;
+        private const double FeetToMm = 304.8;
+
+        private static double ToFeet(double mm) => mm * MmToFeet;
+        private static double ToMm(double feet) => Math.Round(feet * FeetToMm, 2);
+
         private readonly ConcurrentQueue<BridgeTask> _taskQueue = new();
 
         public void EnqueueTask(BridgeTask task)
@@ -90,6 +105,34 @@ namespace RevitBridge
 
                         case TaskType.DeleteElements:
                             HandleDeleteElements(app, task);
+                            break;
+
+                        case TaskType.GetAvailableTypes:
+                            HandleGetAvailableTypes(app, task);
+                            break;
+
+                        case TaskType.CreateLevel:
+                            HandleCreateLevel(app, task);
+                            break;
+
+                        case TaskType.CreateGrid:
+                            HandleCreateGrid(app, task);
+                            break;
+
+                        case TaskType.CreateWall:
+                            HandleCreateWall(app, task);
+                            break;
+
+                        case TaskType.CreateFloor:
+                            HandleCreateFloor(app, task);
+                            break;
+
+                        case TaskType.PlaceFamilyInstance:
+                            HandlePlaceFamilyInstance(app, task);
+                            break;
+
+                        case TaskType.CreateRoom:
+                            HandleCreateRoom(app, task);
                             break;
 
                         default:
@@ -354,6 +397,7 @@ namespace RevitBridge
                 }
 
                 object? bboxObj = null;
+                object? bboxMmObj = null;
                 var bbox = elem.get_BoundingBox(null);
                 if (bbox != null)
                 {
@@ -362,18 +406,38 @@ namespace RevitBridge
                         min = new { x = bbox.Min.X, y = bbox.Min.Y, z = bbox.Min.Z },
                         max = new { x = bbox.Max.X, y = bbox.Max.Y, z = bbox.Max.Z }
                     };
+                    bboxMmObj = new
+                    {
+                        min_mm = new { x = ToMm(bbox.Min.X), y = ToMm(bbox.Min.Y), z = ToMm(bbox.Min.Z) },
+                        max_mm = new { x = ToMm(bbox.Max.X), y = ToMm(bbox.Max.Y), z = ToMm(bbox.Max.Z) }
+                    };
                 }
 
                 string locationDesc = "N/A";
+                object? locationMmObj = null;
                 if (elem.Location is LocationPoint locPt)
                 {
                     locationDesc = $"Point({locPt.Point.X:F2}, {locPt.Point.Y:F2}, {locPt.Point.Z:F2})";
+                    locationMmObj = new
+                    {
+                        type = "Point",
+                        x_mm = ToMm(locPt.Point.X),
+                        y_mm = ToMm(locPt.Point.Y),
+                        z_mm = ToMm(locPt.Point.Z)
+                    };
                 }
                 else if (elem.Location is LocationCurve locCurve)
                 {
                     var p0 = locCurve.Curve.GetEndPoint(0);
                     var p1 = locCurve.Curve.GetEndPoint(1);
                     locationDesc = $"Curve(({p0.X:F2},{p0.Y:F2},{p0.Z:F2}) -> ({p1.X:F2},{p1.Y:F2},{p1.Z:F2}))";
+                    locationMmObj = new
+                    {
+                        type = "Curve",
+                        start_mm = new { x = ToMm(p0.X), y = ToMm(p0.Y), z = ToMm(p0.Z) },
+                        end_mm = new { x = ToMm(p1.X), y = ToMm(p1.Y), z = ToMm(p1.Z) },
+                        length_mm = ToMm(locCurve.Curve.Length)
+                    };
                 }
 
                 task.TaskCompletionSource.SetResult(JsonSerializer.Serialize(new
@@ -385,7 +449,9 @@ namespace RevitBridge
                     type_name = typeName,
                     level = levelName,
                     location = locationDesc,
-                    bounding_box = bboxObj
+                    location_mm = locationMmObj,
+                    bounding_box = bboxObj,
+                    bounding_box_mm = bboxMmObj
                 }));
             }
             catch (Exception ex)
@@ -685,7 +751,8 @@ namespace RevitBridge
                     level_id = l.Id.Value,
                     name = l.Name,
                     elevation = l.Elevation,
-                    elevation_formatted = $"{l.Elevation:F3} ft"
+                    elevation_mm = ToMm(l.Elevation),
+                    elevation_formatted = $"{ToMm(l.Elevation):F0} mm ({l.Elevation:F3} ft)"
                 })
                 .ToList();
 
@@ -790,6 +857,717 @@ namespace RevitBridge
             catch (Exception ex)
             {
                 task.TaskCompletionSource.SetResult(CreateErrorJson($"Failed to delete elements: {ex.Message}"));
+            }
+        }
+
+        private static Level? ResolveLevel(Document doc, JsonElement root)
+        {
+            var allLevels = new FilteredElementCollector(doc)
+                .OfClass(typeof(Level))
+                .Cast<Level>()
+                .OrderBy(l => l.Elevation)
+                .ToList();
+
+            if (allLevels.Count == 0) return null;
+
+            if (root.TryGetProperty("level_id", out var idProp) && idProp.ValueKind == JsonValueKind.Number && idProp.TryGetInt64(out long lvlId))
+            {
+                var byId = allLevels.FirstOrDefault(l => l.Id.Value == lvlId);
+                if (byId != null) return byId;
+            }
+
+            if (root.TryGetProperty("level_name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
+            {
+                string lvlName = nameProp.GetString() ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(lvlName))
+                {
+                    var exact = allLevels.FirstOrDefault(l => l.Name.Equals(lvlName, StringComparison.OrdinalIgnoreCase));
+                    if (exact != null) return exact;
+
+                    if (long.TryParse(lvlName, out long parsedId))
+                    {
+                        var byParsedId = allLevels.FirstOrDefault(l => l.Id.Value == parsedId);
+                        if (byParsedId != null) return byParsedId;
+                    }
+
+                    var partial = allLevels.FirstOrDefault(l => l.Name.Contains(lvlName, StringComparison.OrdinalIgnoreCase));
+                    if (partial != null) return partial;
+                }
+            }
+
+            return allLevels.First();
+        }
+
+        private static void HandleGetAvailableTypes(UIApplication app, BridgeTask task)
+        {
+            var uiDoc = app.ActiveUIDocument;
+            if (uiDoc == null || uiDoc.Document == null)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("No active Revit document."));
+                return;
+            }
+
+            try
+            {
+                string categoryFilter = string.Empty;
+                int limit = 200;
+
+                if (!string.IsNullOrWhiteSpace(task.PayloadJson))
+                {
+                    using var jsonDoc = JsonDocument.Parse(task.PayloadJson);
+                    var root = jsonDoc.RootElement;
+                    if (root.TryGetProperty("category_name", out var catProp) && catProp.ValueKind == JsonValueKind.String)
+                    {
+                        categoryFilter = catProp.GetString() ?? string.Empty;
+                    }
+                    if (root.TryGetProperty("limit", out var limitProp) && limitProp.ValueKind == JsonValueKind.Number)
+                    {
+                        limit = limitProp.GetInt32();
+                    }
+                }
+
+                var doc = uiDoc.Document;
+                var collector = new FilteredElementCollector(doc)
+                    .WhereElementIsElementType();
+
+                var typesList = new List<object>();
+
+                foreach (var elem in collector)
+                {
+                    if (elem is not ElementType elemType || elemType.Category == null) continue;
+
+                    string catName = elemType.Category.Name;
+                    if (!string.IsNullOrWhiteSpace(categoryFilter) &&
+                        !catName.Equals(categoryFilter, StringComparison.OrdinalIgnoreCase) &&
+                        !catName.Contains(categoryFilter, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    typesList.Add(new
+                    {
+                        type_id = elemType.Id.Value,
+                        family_name = elemType.FamilyName ?? "System Family",
+                        type_name = elemType.Name,
+                        full_name = $"{elemType.FamilyName}: {elemType.Name}",
+                        category = catName
+                    });
+
+                    if (typesList.Count >= limit) break;
+                }
+
+                task.TaskCompletionSource.SetResult(JsonSerializer.Serialize(new
+                {
+                    status = "success",
+                    category_filter = string.IsNullOrWhiteSpace(categoryFilter) ? "ALL" : categoryFilter,
+                    count = typesList.Count,
+                    types = typesList
+                }));
+            }
+            catch (Exception ex)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson($"Failed to retrieve available element types: {ex.Message}"));
+            }
+        }
+
+        private static void HandleCreateLevel(UIApplication app, BridgeTask task)
+        {
+            var uiDoc = app.ActiveUIDocument;
+            if (uiDoc == null || uiDoc.Document == null)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("No active Revit document."));
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(task.PayloadJson))
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("Payload JSON is empty."));
+                return;
+            }
+
+            try
+            {
+                using var jsonDoc = JsonDocument.Parse(task.PayloadJson);
+                var root = jsonDoc.RootElement;
+
+                if (!root.TryGetProperty("elevation_mm", out var elevProp) || !elevProp.TryGetDouble(out double elevationMm))
+                {
+                    task.TaskCompletionSource.SetResult(CreateErrorJson("Property 'elevation_mm' (number) is required."));
+                    return;
+                }
+
+                string? levelName = null;
+                if (root.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
+                {
+                    levelName = nameProp.GetString();
+                }
+
+                var doc = uiDoc.Document;
+                Level newLevel;
+
+                using (var tx = new Transaction(doc, "MCP Create Level"))
+                {
+                    tx.Start();
+                    newLevel = Level.Create(doc, ToFeet(elevationMm));
+                    if (!string.IsNullOrWhiteSpace(levelName))
+                    {
+                        newLevel.Name = levelName;
+                    }
+                    tx.Commit();
+                }
+
+                task.TaskCompletionSource.SetResult(JsonSerializer.Serialize(new
+                {
+                    status = "success",
+                    message = $"Level '{newLevel.Name}' created at {elevationMm} mm.",
+                    level_id = newLevel.Id.Value,
+                    name = newLevel.Name,
+                    elevation_mm = ToMm(newLevel.Elevation),
+                    elevation_ft = newLevel.Elevation
+                }));
+            }
+            catch (Exception ex)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson($"Failed to create level: {ex.Message}"));
+            }
+        }
+
+        private static void HandleCreateGrid(UIApplication app, BridgeTask task)
+        {
+            var uiDoc = app.ActiveUIDocument;
+            if (uiDoc == null || uiDoc.Document == null)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("No active Revit document."));
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(task.PayloadJson))
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("Payload JSON is empty."));
+                return;
+            }
+
+            try
+            {
+                using var jsonDoc = JsonDocument.Parse(task.PayloadJson);
+                var root = jsonDoc.RootElement;
+
+                double startX = root.GetProperty("start_x_mm").GetDouble();
+                double startY = root.GetProperty("start_y_mm").GetDouble();
+                double endX = root.GetProperty("end_x_mm").GetDouble();
+                double endY = root.GetProperty("end_y_mm").GetDouble();
+
+                string? gridName = null;
+                if (root.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
+                {
+                    gridName = nameProp.GetString();
+                }
+
+                var p0 = new XYZ(ToFeet(startX), ToFeet(startY), 0);
+                var p1 = new XYZ(ToFeet(endX), ToFeet(endY), 0);
+                var line = Line.CreateBound(p0, p1);
+
+                var doc = uiDoc.Document;
+                Grid newGrid;
+
+                using (var tx = new Transaction(doc, "MCP Create Grid"))
+                {
+                    tx.Start();
+                    newGrid = Grid.Create(doc, line);
+                    if (!string.IsNullOrWhiteSpace(gridName))
+                    {
+                        newGrid.Name = gridName;
+                    }
+                    tx.Commit();
+                }
+
+                task.TaskCompletionSource.SetResult(JsonSerializer.Serialize(new
+                {
+                    status = "success",
+                    message = $"Grid '{newGrid.Name}' created.",
+                    grid_id = newGrid.Id.Value,
+                    name = newGrid.Name,
+                    start_mm = new { x = startX, y = startY },
+                    end_mm = new { x = endX, y = endY }
+                }));
+            }
+            catch (Exception ex)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson($"Failed to create grid: {ex.Message}"));
+            }
+        }
+
+        private static void HandleCreateWall(UIApplication app, BridgeTask task)
+        {
+            var uiDoc = app.ActiveUIDocument;
+            if (uiDoc == null || uiDoc.Document == null)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("No active Revit document."));
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(task.PayloadJson))
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("Payload JSON is empty."));
+                return;
+            }
+
+            try
+            {
+                using var jsonDoc = JsonDocument.Parse(task.PayloadJson);
+                var root = jsonDoc.RootElement;
+
+                double startX = root.GetProperty("start_x_mm").GetDouble();
+                double startY = root.GetProperty("start_y_mm").GetDouble();
+                double endX = root.GetProperty("end_x_mm").GetDouble();
+                double endY = root.GetProperty("end_y_mm").GetDouble();
+
+                double heightMm = 3000.0;
+                if (root.TryGetProperty("height_mm", out var hProp) && hProp.ValueKind == JsonValueKind.Number)
+                {
+                    heightMm = hProp.GetDouble();
+                }
+
+                double offsetMm = 0.0;
+                if (root.TryGetProperty("offset_mm", out var offProp) && offProp.ValueKind == JsonValueKind.Number)
+                {
+                    offsetMm = offProp.GetDouble();
+                }
+
+                bool structural = false;
+                if (root.TryGetProperty("structural", out var structProp) &&
+                    (structProp.ValueKind == JsonValueKind.True || structProp.ValueKind == JsonValueKind.False))
+                {
+                    structural = structProp.GetBoolean();
+                }
+
+                var doc = uiDoc.Document;
+                var level = ResolveLevel(doc, root);
+                if (level == null)
+                {
+                    task.TaskCompletionSource.SetResult(CreateErrorJson("No Levels found in document to host the wall."));
+                    return;
+                }
+
+                WallType? selectedWallType = null;
+                if (root.TryGetProperty("wall_type_name", out var wtProp) && wtProp.ValueKind == JsonValueKind.String)
+                {
+                    string wtName = wtProp.GetString() ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(wtName))
+                    {
+                        var wallTypes = new FilteredElementCollector(doc)
+                            .OfClass(typeof(WallType))
+                            .Cast<WallType>()
+                            .ToList();
+
+                        selectedWallType = wallTypes.FirstOrDefault(w =>
+                            w.Name.Equals(wtName, StringComparison.OrdinalIgnoreCase) ||
+                            $"{w.FamilyName}: {w.Name}".Equals(wtName, StringComparison.OrdinalIgnoreCase))
+                            ?? wallTypes.FirstOrDefault(w => w.Name.Contains(wtName, StringComparison.OrdinalIgnoreCase));
+                    }
+                }
+
+                var p0 = new XYZ(ToFeet(startX), ToFeet(startY), level.Elevation);
+                var p1 = new XYZ(ToFeet(endX), ToFeet(endY), level.Elevation);
+                var wallLine = Line.CreateBound(p0, p1);
+
+                Wall newWall;
+                using (var tx = new Transaction(doc, "MCP Create Wall"))
+                {
+                    tx.Start();
+                    ElementId wallTypeId = selectedWallType?.Id ?? doc.GetDefaultElementTypeId(ElementTypeGroup.WallType);
+                    newWall = Wall.Create(doc, wallLine, wallTypeId, level.Id, ToFeet(heightMm), ToFeet(offsetMm), false, structural);
+                    tx.Commit();
+                }
+
+                task.TaskCompletionSource.SetResult(JsonSerializer.Serialize(new
+                {
+                    status = "success",
+                    message = $"Wall created (ID: {newWall.Id.Value}) on level '{level.Name}'.",
+                    element_id = newWall.Id.Value,
+                    name = newWall.Name,
+                    wall_type = newWall.WallType?.Name ?? "Default",
+                    level = level.Name,
+                    height_mm = heightMm,
+                    length_mm = ToMm(wallLine.Length),
+                    start_mm = new { x = startX, y = startY },
+                    end_mm = new { x = endX, y = endY }
+                }));
+            }
+            catch (Exception ex)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson($"Failed to create wall: {ex.Message}"));
+            }
+        }
+
+        private static void HandleCreateFloor(UIApplication app, BridgeTask task)
+        {
+            var uiDoc = app.ActiveUIDocument;
+            if (uiDoc == null || uiDoc.Document == null)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("No active Revit document."));
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(task.PayloadJson))
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("Payload JSON is empty."));
+                return;
+            }
+
+            try
+            {
+                using var jsonDoc = JsonDocument.Parse(task.PayloadJson);
+                var root = jsonDoc.RootElement;
+
+                if (!root.TryGetProperty("points_mm", out var ptsProp) || ptsProp.ValueKind != JsonValueKind.Array)
+                {
+                    task.TaskCompletionSource.SetResult(CreateErrorJson("Property 'points_mm' must be an array of [x_mm, y_mm] or {\"x\": x_mm, \"y\": y_mm} coordinates."));
+                    return;
+                }
+
+                var doc = uiDoc.Document;
+                var level = ResolveLevel(doc, root);
+                if (level == null)
+                {
+                    task.TaskCompletionSource.SetResult(CreateErrorJson("No Levels found in document to host the floor."));
+                    return;
+                }
+
+                var xyzPoints = new List<XYZ>();
+                foreach (var ptElem in ptsProp.EnumerateArray())
+                {
+                    double xMm, yMm;
+                    if (ptElem.ValueKind == JsonValueKind.Array)
+                    {
+                        var arr = ptElem.EnumerateArray().ToList();
+                        if (arr.Count < 2) continue;
+                        xMm = arr[0].GetDouble();
+                        yMm = arr[1].GetDouble();
+                    }
+                    else if (ptElem.ValueKind == JsonValueKind.Object)
+                    {
+                        xMm = ptElem.GetProperty("x").GetDouble();
+                        yMm = ptElem.GetProperty("y").GetDouble();
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    xyzPoints.Add(new XYZ(ToFeet(xMm), ToFeet(yMm), level.Elevation));
+                }
+
+                if (xyzPoints.Count < 3)
+                {
+                    task.TaskCompletionSource.SetResult(CreateErrorJson("At least 3 boundary points are required to create a floor."));
+                    return;
+                }
+
+                // Remove duplicate closing point if caller passed start point again at the end
+                if (xyzPoints.Count > 3 && xyzPoints.First().IsAlmostEqualTo(xyzPoints.Last()))
+                {
+                    xyzPoints.RemoveAt(xyzPoints.Count - 1);
+                }
+
+                var curveLoop = new CurveLoop();
+                for (int i = 0; i < xyzPoints.Count; i++)
+                {
+                    var pStart = xyzPoints[i];
+                    var pEnd = xyzPoints[(i + 1) % xyzPoints.Count];
+                    curveLoop.Append(Line.CreateBound(pStart, pEnd));
+                }
+
+                ElementId floorTypeId = ElementId.InvalidElementId;
+                if (root.TryGetProperty("floor_type_name", out var ftProp) && ftProp.ValueKind == JsonValueKind.String)
+                {
+                    string ftName = ftProp.GetString() ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(ftName))
+                    {
+                        var floorTypes = new FilteredElementCollector(doc)
+                            .OfClass(typeof(FloorType))
+                            .Cast<FloorType>()
+                            .Where(ft => !ft.IsFoundationSlab)
+                            .ToList();
+
+                        var matched = floorTypes.FirstOrDefault(f =>
+                            f.Name.Equals(ftName, StringComparison.OrdinalIgnoreCase) ||
+                            $"{f.FamilyName}: {f.Name}".Equals(ftName, StringComparison.OrdinalIgnoreCase))
+                            ?? floorTypes.FirstOrDefault(f => f.Name.Contains(ftName, StringComparison.OrdinalIgnoreCase));
+
+                        if (matched != null) floorTypeId = matched.Id;
+                    }
+                }
+
+                if (floorTypeId == ElementId.InvalidElementId)
+                {
+                    floorTypeId = Floor.GetDefaultFloorType(doc, false);
+                }
+
+                Floor newFloor;
+                using (var tx = new Transaction(doc, "MCP Create Floor"))
+                {
+                    tx.Start();
+                    newFloor = Floor.Create(doc, new List<CurveLoop> { curveLoop }, floorTypeId, level.Id);
+                    tx.Commit();
+                }
+
+                task.TaskCompletionSource.SetResult(JsonSerializer.Serialize(new
+                {
+                    status = "success",
+                    message = $"Floor created (ID: {newFloor.Id.Value}) on level '{level.Name}'.",
+                    element_id = newFloor.Id.Value,
+                    name = newFloor.Name,
+                    floor_type = newFloor.FloorType?.Name ?? "Default",
+                    level = level.Name,
+                    vertex_count = xyzPoints.Count
+                }));
+            }
+            catch (Exception ex)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson($"Failed to create floor: {ex.Message}"));
+            }
+        }
+
+        private static void HandlePlaceFamilyInstance(UIApplication app, BridgeTask task)
+        {
+            var uiDoc = app.ActiveUIDocument;
+            if (uiDoc == null || uiDoc.Document == null)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("No active Revit document."));
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(task.PayloadJson))
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("Payload JSON is empty."));
+                return;
+            }
+
+            try
+            {
+                using var jsonDoc = JsonDocument.Parse(task.PayloadJson);
+                var root = jsonDoc.RootElement;
+
+                double xMm = root.GetProperty("x_mm").GetDouble();
+                double yMm = root.GetProperty("y_mm").GetDouble();
+                double zMm = 0.0;
+                if (root.TryGetProperty("z_mm", out var zProp) && zProp.ValueKind == JsonValueKind.Number)
+                {
+                    zMm = zProp.GetDouble();
+                }
+
+                double rotationDeg = 0.0;
+                if (root.TryGetProperty("rotation_deg", out var rotProp) && rotProp.ValueKind == JsonValueKind.Number)
+                {
+                    rotationDeg = rotProp.GetDouble();
+                }
+
+                string typeNameFilter = root.TryGetProperty("type_name", out var tnProp) && tnProp.ValueKind == JsonValueKind.String
+                    ? (tnProp.GetString() ?? string.Empty)
+                    : string.Empty;
+
+                string familyOrCategoryFilter = root.TryGetProperty("category_or_family_name", out var cfProp) && cfProp.ValueKind == JsonValueKind.String
+                    ? (cfProp.GetString() ?? string.Empty)
+                    : string.Empty;
+
+                var doc = uiDoc.Document;
+                var level = ResolveLevel(doc, root);
+                if (level == null)
+                {
+                    task.TaskCompletionSource.SetResult(CreateErrorJson("No Levels found in document."));
+                    return;
+                }
+
+                var symbols = new FilteredElementCollector(doc)
+                    .OfClass(typeof(FamilySymbol))
+                    .Cast<FamilySymbol>()
+                    .ToList();
+
+                FamilySymbol? matchedSymbol = null;
+
+                if (root.TryGetProperty("type_id", out var tidProp) && tidProp.ValueKind == JsonValueKind.Number && tidProp.TryGetInt64(out long typeIdVal))
+                {
+                    matchedSymbol = symbols.FirstOrDefault(s => s.Id.Value == typeIdVal);
+                }
+
+                if (matchedSymbol == null)
+                {
+                    var candidates = symbols.AsEnumerable();
+
+                    if (!string.IsNullOrWhiteSpace(familyOrCategoryFilter))
+                    {
+                        var filtered = candidates.Where(s =>
+                            (s.FamilyName != null && s.FamilyName.Contains(familyOrCategoryFilter, StringComparison.OrdinalIgnoreCase)) ||
+                            (s.Category != null && s.Category.Name.Contains(familyOrCategoryFilter, StringComparison.OrdinalIgnoreCase)))
+                            .ToList();
+
+                        if (filtered.Count > 0) candidates = filtered;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(typeNameFilter))
+                    {
+                        matchedSymbol = candidates.FirstOrDefault(s =>
+                            s.Name.Equals(typeNameFilter, StringComparison.OrdinalIgnoreCase) ||
+                            $"{s.FamilyName}: {s.Name}".Equals(typeNameFilter, StringComparison.OrdinalIgnoreCase))
+                            ?? candidates.FirstOrDefault(s => s.Name.Contains(typeNameFilter, StringComparison.OrdinalIgnoreCase));
+                    }
+                    else
+                    {
+                        matchedSymbol = candidates.FirstOrDefault();
+                    }
+                }
+
+                if (matchedSymbol == null)
+                {
+                    task.TaskCompletionSource.SetResult(CreateErrorJson(
+                        $"No matching FamilySymbol found for category/family '{familyOrCategoryFilter}' and type '{typeNameFilter}'. Use get_available_types() to inspect loaded families."));
+                    return;
+                }
+
+                Element? hostElement = null;
+                if (root.TryGetProperty("host_element_id", out var hostProp) && hostProp.ValueKind == JsonValueKind.Number && hostProp.TryGetInt64(out long hostIdVal) && hostIdVal > 0)
+                {
+                    hostElement = doc.GetElement(new ElementId(hostIdVal));
+                }
+
+                FamilyInstance instance;
+                using (var tx = new Transaction(doc, "MCP Place Family Instance"))
+                {
+                    tx.Start();
+
+                    if (!matchedSymbol.IsActive)
+                    {
+                        matchedSymbol.Activate();
+                        doc.Regenerate();
+                    }
+
+                    var locationPt = new XYZ(ToFeet(xMm), ToFeet(yMm), level.Elevation + ToFeet(zMm));
+
+                    if (hostElement != null)
+                    {
+                        if (hostElement.Location is LocationCurve hostLocCurve)
+                        {
+                            var proj = hostLocCurve.Curve.Project(new XYZ(locationPt.X, locationPt.Y, hostLocCurve.Curve.GetEndPoint(0).Z));
+                            if (proj != null)
+                            {
+                                locationPt = new XYZ(proj.XYZPoint.X, proj.XYZPoint.Y, level.Elevation + ToFeet(zMm));
+                            }
+                        }
+
+                        instance = doc.Create.NewFamilyInstance(locationPt, matchedSymbol, hostElement, level, StructuralType.NonStructural);
+                    }
+                    else
+                    {
+                        var stType = matchedSymbol.Category != null &&
+                                     matchedSymbol.Category.Name.Contains("Structural", StringComparison.OrdinalIgnoreCase)
+                            ? StructuralType.Column
+                            : StructuralType.NonStructural;
+
+                        instance = doc.Create.NewFamilyInstance(locationPt, matchedSymbol, level, stType);
+                    }
+
+                    if (Math.Abs(rotationDeg) > 0.001 && hostElement == null)
+                    {
+                        var axis = Line.CreateBound(locationPt, locationPt + XYZ.BasisZ);
+                        ElementTransformUtils.RotateElement(doc, instance.Id, axis, rotationDeg * Math.PI / 180.0);
+                    }
+
+                    tx.Commit();
+                }
+
+                task.TaskCompletionSource.SetResult(JsonSerializer.Serialize(new
+                {
+                    status = "success",
+                    message = $"Placed '{matchedSymbol.FamilyName}: {matchedSymbol.Name}' (ID: {instance.Id.Value}).",
+                    element_id = instance.Id.Value,
+                    family_name = matchedSymbol.FamilyName,
+                    type_name = matchedSymbol.Name,
+                    category = instance.Category?.Name ?? "Uncategorized",
+                    level = level.Name,
+                    host_element_id = hostElement?.Id.Value
+                }));
+            }
+            catch (Exception ex)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson($"Failed to place family instance: {ex.Message}"));
+            }
+        }
+
+        private static void HandleCreateRoom(UIApplication app, BridgeTask task)
+        {
+            var uiDoc = app.ActiveUIDocument;
+            if (uiDoc == null || uiDoc.Document == null)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("No active Revit document."));
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(task.PayloadJson))
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson("Payload JSON is empty."));
+                return;
+            }
+
+            try
+            {
+                using var jsonDoc = JsonDocument.Parse(task.PayloadJson);
+                var root = jsonDoc.RootElement;
+
+                double xMm = root.GetProperty("x_mm").GetDouble();
+                double yMm = root.GetProperty("y_mm").GetDouble();
+
+                string? roomName = root.TryGetProperty("room_name", out var rnProp) && rnProp.ValueKind == JsonValueKind.String
+                    ? rnProp.GetString()
+                    : null;
+
+                string? roomNumber = root.TryGetProperty("room_number", out var rnumProp) && rnumProp.ValueKind == JsonValueKind.String
+                    ? rnumProp.GetString()
+                    : null;
+
+                var doc = uiDoc.Document;
+                var level = ResolveLevel(doc, root);
+                if (level == null)
+                {
+                    task.TaskCompletionSource.SetResult(CreateErrorJson("No Levels found in document to host the room."));
+                    return;
+                }
+
+                Room newRoom;
+                using (var tx = new Transaction(doc, "MCP Create Room"))
+                {
+                    tx.Start();
+                    var uvPt = new UV(ToFeet(xMm), ToFeet(yMm));
+                    newRoom = doc.Create.NewRoom(level, uvPt);
+
+                    if (!string.IsNullOrWhiteSpace(roomName))
+                    {
+                        newRoom.Name = roomName;
+                    }
+                    if (!string.IsNullOrWhiteSpace(roomNumber))
+                    {
+                        newRoom.Number = roomNumber;
+                    }
+                    tx.Commit();
+                }
+
+                // 1 sq ft = 0.09290304 sq m
+                double areaSqm = Math.Round(newRoom.Area * 0.09290304, 2);
+
+                task.TaskCompletionSource.SetResult(JsonSerializer.Serialize(new
+                {
+                    status = "success",
+                    message = $"Room '{newRoom.Name}' ({newRoom.Number}) created on level '{level.Name}'.",
+                    element_id = newRoom.Id.Value,
+                    room_name = newRoom.Name,
+                    room_number = newRoom.Number,
+                    level = level.Name,
+                    area_sqm = areaSqm
+                }));
+            }
+            catch (Exception ex)
+            {
+                task.TaskCompletionSource.SetResult(CreateErrorJson($"Failed to create room: {ex.Message}"));
             }
         }
 

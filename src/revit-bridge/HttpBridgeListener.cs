@@ -153,6 +153,41 @@ namespace RevitBridge
                     string body = await ReadBodyAsync(request);
                     responseJson = await DispatchToRevitAsync(TaskType.DeleteElements, body);
                 }
+                else if (method == "POST" && rawPath == "/elements/types")
+                {
+                    string body = await ReadBodyAsync(request);
+                    responseJson = await DispatchToRevitAsync(TaskType.GetAvailableTypes, body);
+                }
+                else if (method == "POST" && rawPath == "/levels/create")
+                {
+                    string body = await ReadBodyAsync(request);
+                    responseJson = await DispatchToRevitAsync(TaskType.CreateLevel, body);
+                }
+                else if (method == "POST" && rawPath == "/grids/create")
+                {
+                    string body = await ReadBodyAsync(request);
+                    responseJson = await DispatchToRevitAsync(TaskType.CreateGrid, body);
+                }
+                else if (method == "POST" && rawPath == "/walls/create")
+                {
+                    string body = await ReadBodyAsync(request);
+                    responseJson = await DispatchToRevitAsync(TaskType.CreateWall, body);
+                }
+                else if (method == "POST" && rawPath == "/floors/create")
+                {
+                    string body = await ReadBodyAsync(request);
+                    responseJson = await DispatchToRevitAsync(TaskType.CreateFloor, body);
+                }
+                else if (method == "POST" && rawPath == "/family-instance/place")
+                {
+                    string body = await ReadBodyAsync(request);
+                    responseJson = await DispatchToRevitAsync(TaskType.PlaceFamilyInstance, body);
+                }
+                else if (method == "POST" && rawPath == "/rooms/create")
+                {
+                    string body = await ReadBodyAsync(request);
+                    responseJson = await DispatchToRevitAsync(TaskType.CreateRoom, body);
+                }
                 else
                 {
                     statusCode = (int)HttpStatusCode.NotFound;
